@@ -1,0 +1,851 @@
+---
+title: "Project4"
+author: "Oleksandr Bugrimenko"
+date: "January 18, 2016"
+output: html_document
+used libraries: ggplot2, gridExtra, reshape2, RColorBrewer
+---
+
+```{r global_options, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='Figs/', echo=FALSE, 
+                      warning=FALSE, message=FALSE)
+library(ggplot2)
+library(gridExtra)
+library(reshape2)
+library(RColorBrewer)
+```
+
+## Objective
+
+"In stock market, technical analysis is the study of market action, primarily through the use of charts, for the purpose of forecasting future price trends. In its purest form, technical analysis considers only the actual price behavior of the market or instrument, based on the premise that price reflects all relevant factors before an investor becomes aware of them through other channels. Technicians say that a market's price reflects all relevant information, so their analysis looks more at "internals" than at "externals" such as news events. Price action also tends to repeat itself because investors collectively tend toward patterned behavior - hence technicians' focus on identifiable trends and conditions." (source: [stock2own.com](http://www.stock2own.com/StockMarket/Theory/TechnicalAnalysis))
+
+In this project I want to analyze relationship between technical indicators, such as moving averages and MACD, and makret price of a stock. In other words, I want to validate the premise that future price of a stock can be predicted by technical indicators. In particular, I'm interested to discover a correlation between technical indicators and a short term (1-2 weeks) price moves.
+
+## Data Set
+
+The data set used for this project, contains the list of most US stocks traded on US Stock Exchanges as of December 31st, 2015. List of stocks is limited and includes only stocks that close market day of December 31st, 2015 with a price of $10 per share or higher. It filters out "penny stocks", which are extremely risky and therefore more volatile than the rest of the market.
+
+The data includes some basic fundamental characteristics as well as prices and technical indicators as of market close on December 31st, 2015. All fundamental characteristics provided as of latest available financial statement.
+
+Last 4 columns show prices as of market close on the first two Fridays of 2016, i.e. as of January 7th and January 14th of 2016. It allows to compute a short term price moves in a form of weekly gain or loss for the first two weeks of 2016.
+
+Data set described in the S2O_StockList.rd file and has the following structure:
+```{r}
+s2o_stocks <- read.csv("S2O_StockList.csv")  # , stringsAsFactors=FALSE
+str(s2o_stocks)
+```
+
+### Data Summary
+
+```{r}
+summary(s2o_stocks)
+```
+
+### Data Overview
+
+Each stock characterized by it's price and trading volume. Trading volume shows how many shares have changed hands (were bought and sold) during the trading day. Volume shows how liquid the stock is. In order to make a proper conclusions we should focus on liquid stocks, those that trade a lot every day. 
+
+```{r}
+summary(s2o_stocks$MktPrice_Close)
+summary(s2o_stocks$MktPrice_VolumeAvg)
+```
+
+Price ranges from $10.02 to $197,800 per share and avergae volume is in range from 107 to 71 mln shares.
+
+```{r}
+ggplot(aes(x = MktPrice_VolumeAvg, y = MktPrice_Close), data = s2o_stocks) + 
+  geom_point(alpha = 0.5, position = 'jitter') + 
+  ggtitle('Price by Volume')
+```
+
+The variety is enormous, therefore a logarithmic scale seems appropriate for the plot.
+
+```{r}
+ggplot(aes(x = MktPrice_VolumeAvg, y = MktPrice_Close), data = s2o_stocks) + 
+  geom_point(alpha = 0.5, position = 'jitter') +
+  scale_x_log10() +
+  scale_y_log10() + 
+  ggtitle('Price by Volume (log scale)')
+```
+
+Extremely highly priced stocks have relatively small trading volume - perhaps not so many people can buy a stock for $197,000 per share. It was expected.
+
+Introducing a new variable: VAvg_Mln - average daily volume in millions. Now it is a bit easier to work with extremely large volumes.
+
+```{r}
+s2o_stocks$VAvg_Mln = s2o_stocks$MktPrice_VolumeAvg/1000000
+```
+
+Average daily volume vs market price (price is limited by 99% quantile):
+
+```{r warning=FALSE}
+ggplot(aes(x=VAvg_Mln, y=MktPrice_Close), data = s2o_stocks) +
+  geom_point(alpha=0.5, position=position_jitter(h=0)) +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99)))
+```
+
+Very few stocks that priced above $100 have daily volume greater than 20 million shares.
+
+Price variety by sector (99% quantile):
+
+```{r warning=FALSE}
+ggplot(data = s2o_stocks, aes(x = MktPrice_Close)) + 
+  geom_histogram(binwidth = 1) + 
+  scale_x_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99))) +
+  facet_wrap(~Sector)
+
+qplot(x = substr(Sector,0,5), y = MktPrice_Close, data = s2o_stocks, 
+      geom = 'boxplot') +
+  xlab('Sector') +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99)))
+```
+
+For most of the sectors the median price per share is below $50 and Healthcare sector seems to have most expensive stocks. At the same time, Financial sector has more outliers with higher stock prices.
+
+Volume variety by sector (99% quantile):
+
+```{r warning=FALSE}
+ggplot(data = s2o_stocks, aes(x = VAvg_Mln)) + 
+  geom_histogram(binwidth = 0.1) + 
+  scale_x_continuous(lim = c(0, quantile(s2o_stocks$VAvg_Mln, 0.99))) +
+  facet_wrap(~Sector)
+
+qplot(x = substr(Sector,0,5), y = VAvg_Mln, data = s2o_stocks, 
+      geom = 'boxplot') +
+  xlab('Sector') +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$VAvg_Mln, 0.99)))
+```
+
+Basic Materials stocks are among most havily traded stocks, which is probably explainable by the recent crash in oil prices.
+
+In order to minimize bias, it seems reasonable to exclude less liquid stocks from the analysis. We want to get rid of the 1st quantile of data and put a limit of 64,000 shares as a minimum accepted value for an average trading volume. Let's see how this may affect overall stocks diversity by two major classifications: market capitalization and sector. Note though, this rule will eliminate outliers on the lower side only, therefore, in order to make it easier to compare plots, we shall also limit below plots by 99% percentile on y axis. 
+
+```{r warning=FALSE}
+# Sort market cap
+s2o_stocks$mktcap.ordered <- factor(s2o_stocks$MktCapType, 
+  levels=c("Large", "Mid", "Small", "Micro", ""), ordered = T)
+
+p1 <- ggplot(aes(x = mktcap.ordered, y = MktPrice_Close), data = s2o_stocks) + 
+  geom_point(alpha = 0.5, size = 1, position = 'jitter') +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99))) +
+  ggtitle('Price by Market Cap')
+p2 <- ggplot(aes(x = mktcap.ordered, y = MktPrice_Close), 
+             data = subset(s2o_stocks, MktPrice_VolumeAvg > 64000)) + 
+  geom_point(alpha = 0.5, size = 1, position = 'jitter') +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99))) +
+  ggtitle('Price by Market Cap (limited)')
+grid.arrange(p1, p2, ncol=2)
+```
+
+It definitely changed the picture - it almost wiped out market capitalization category "micro" and significantly reduced "small" stocks population. It also eliminated big outliers with prices in $100,000 range. And both results are satisfying - we want to focus analysis on a liquid stocks and micro and small cap stocks as well as extremely highly priced stocks with small daily trading volumes should be excluded.
+
+```{r warning=FALSE}
+p1 <- ggplot(aes(x = substr(Sector,0,3), y = MktPrice_Close), 
+             data = s2o_stocks) + 
+  geom_point(alpha = 0.8, size = 1, position = 'jitter') +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99))) +
+  xlab("Sector") +
+  ggtitle('Price by Market Sector')
+p2 <- ggplot(aes(x = substr(Sector,0,3), y = MktPrice_Close), 
+             data = subset(s2o_stocks, MktPrice_VolumeAvg > 64000)) + 
+  geom_point(alpha = 0.8, size = 1, position = 'jitter') +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99))) +
+  xlab("Sector") +
+  ggtitle('Price by Market Sector (limited)')
+grid.arrange(p1, p2, ncol=2)
+```
+
+Sector presence seems OK and stocks that do not have sector classification are among those that disappeared the most from the plot. Perhaps not liquid stocks do not have as good data quality as those that traded a lot. 
+
+Let's check how market capitalization affect stock price and trading volume on a limited data set.
+
+```{r warning=FALSE}
+ggplot(aes(x = VAvg_Mln, y = MktPrice_Close, colour = mktcap.ordered),
+       data = subset(s2o_stocks, s2o_stocks$MktPrice_VolumeAvg > 64000)) + 
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_point(alpha = 0.8, size = 1, position = 'jitter') +
+  scale_color_brewer(type = 'seq', direction = -1,
+          guide = guide_legend(title = 'Mkt Cap', reverse = F,
+                              override.aes = list(alpha = 1, size = 2))) +  
+  xlab('Average Volume in mln (log10)') + ylab('Market Price (log10)') +
+  ggtitle('Price by avg. Volume and Mkt Cap') +
+  geom_smooth(method = "lm", color = "red", size=0.5)  # linear correlation line
+```
+
+It is clear that the larger the market capitalization, the bigger the trade volume is. There are some large stocks could be found with a relatively small price (around $10), however, it is really rare to see mideum or small cap stocks traded with a price significantly greater than $100.
+
+The correlation between market price and average volume is rather small - the red linear correlation line has relatively small positive slop. 
+
+The similar plots by sectors:
+
+```{r}
+ggplot(aes(x = VAvg_Mln, y = MktPrice_Close), 
+       data = subset(s2o_stocks, s2o_stocks$MktPrice_VolumeAvg > 64000)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab('Average Volume in mln (log10)') + ylab('Market Price (log10)') +
+  facet_wrap(~ Sector, ncol=2) +
+  geom_point(aes(color = mktcap.ordered), alpha = 0.8, size=1, 
+             position = "jitter") +
+  scale_color_brewer(type = 'seq', direction = -1,
+          guide = guide_legend(title = 'Mkt Cap', reverse = F,
+                              override.aes = list(alpha = 1, size = 2))) +  
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7)
+```
+
+## Data Transformations
+
+The objective of this project is to discover relationship between technical indicators and future stock price change. Each group of indicators usually used in a certain specific way by market technitians. In this project we will focus on Moving Averages, RSI and MACD. 
+
+### Moving Averages (MA)
+
+Data set contains information about 5 moving averages:
+
+* short term moving averages: MA10 and MA30 (10 and 30 days moving averages)
+* medium term: MA50
+* long term: MA150 and MA200
+
+In general we are not interested in absolute values of the MA, instead technical analysts are focusing on moving average relative to the price line or to other MAs. In other words, in order to identify the trend we want to know if the price is above or below the moving average and how moving averages are positioned against each other (above, below, crossed over). In particular, it is usually advised to compare moving averages of different time frames. For example, check when a short term moving average (MA10 or MA30) has crossed medium term (MA50) and long term (MA150 and MA200) moving averages. (source: [stock2own.com](http://www.stock2own.com/StockMarket/Theory/TechnicalAnalysis/Moving-Average))
+
+MAx_Price columns will show the distance in % between MA and the price.
+
+```{r}
+# -- MA changes as a percentage to the price
+s2o_stocks$MA10_Price = round((s2o_stocks$MktPrice_Close - s2o_stocks$MA10) / 
+                                s2o_stocks$MktPrice_Close, digits = 4)
+s2o_stocks$MA30_Price = round((s2o_stocks$MktPrice_Close - s2o_stocks$MA30) / 
+                                s2o_stocks$MktPrice_Close, digits = 4)
+s2o_stocks$MA50_Price = round((s2o_stocks$MktPrice_Close - s2o_stocks$MA50) / 
+                                s2o_stocks$MktPrice_Close, digits = 4)
+s2o_stocks$MA150_Price = round((s2o_stocks$MktPrice_Close - s2o_stocks$MA150) / 
+                                 s2o_stocks$MktPrice_Close, digits = 4)
+s2o_stocks$MA200_Price = round((s2o_stocks$MktPrice_Close - s2o_stocks$MA200) / 
+                                 s2o_stocks$MktPrice_Close, digits = 4)
+
+# -- comparing shorter MA to longer MA between MA10-MA50, MA50-MA200
+s2o_stocks$MA10_MA50 = round((s2o_stocks$MA10 - s2o_stocks$MA50) / 
+                               s2o_stocks$MA10, digits = 4)
+s2o_stocks$MA10_MA200 = round((s2o_stocks$MA10 - s2o_stocks$MA200) / 
+                                s2o_stocks$MA10, digits = 4)
+s2o_stocks$MA50_MA200 = round((s2o_stocks$MA50 - s2o_stocks$MA200) / 
+                                s2o_stocks$MA50, digits = 4)
+```
+
+### RSI
+
+"The RSI is classified as a momentum oscillator, measuring the velocity and magnitude of directional price movements. Momentum is the rate of the rise or fall in price. ... The RSI is most typically used on a 14 day timeframe, measured on a scale from 0 to 100.
+
+Traditionally, RSI readings greater than the 70 level are considered to be in overbought territory, and RSI readings lower than the 30 level are considered to be in oversold territory. In between the 30 and 70 level is considered neutral, with the 50 level a sign of no trend."
+(source: [stock2own.com](http://www.stock2own.com/StockMarket/Theory/TechnicalAnalysis/RSI))
+
+Therefore we will compute RSIV as a difference between RSI and the 50 level.
+
+```{r}
+s2o_stocks$RSIV = round((s2o_stocks$RSI - 50) / 50, digits = 4)
+```
+
+### MACD
+
+"The MACD-Histogram represents the difference between the MACD and its trigger line, the 9-day EMA of MACD. The plot of this difference is presented as a histogram, making centerline crossovers and divergences easily identifiable. A centerline crossover for the MACD-Histogram is the same as a moving average crossover for MACD." (source: [stock2own.com](http://www.stock2own.com/StockMarket/Theory/TechnicalAnalysis/MACD))
+
+The MACD value in a dataset is actually a MACD histogram value, therefore no modifications required for MACD.
+
+### Weekly Price Change
+
+Finally, we have to compute weekly price change for the first two weeks of January. Because we have technical indicators as of December 31st, it makes sense to compute price change for the first and second weeks as well as price change for two complete weeks. We can think about it as a short term (1 week) and a little bit longer term (2 weeks) projections. All changes computed as a percentage, so we can easily compare them for stocks with significantly different prices.
+
+```{r}
+# current price change
+s2o_stocks$Price = round(s2o_stocks$MktPrice_Change / s2o_stocks$MktPrice_Close, 
+                         digits = 4)
+s2o_stocks$Volume = round((s2o_stocks$MktPrice_Volume - 
+                             s2o_stocks$MktPrice_VolumeAvg) / 
+                            s2o_stocks$MktPrice_VolumeAvg, digits = 4)
+# future price change
+s2o_stocks$Wk1_Price = round((s2o_stocks$Jan_07_MktPrice_Close - 
+                                s2o_stocks$MktPrice_Close) / 
+                               s2o_stocks$MktPrice_Close, digits = 4)
+s2o_stocks$Wk1_Volume = round((s2o_stocks$Jan_07_MktPrice_Volume - 
+                                 s2o_stocks$MktPrice_VolumeAvg) / 
+                                s2o_stocks$MktPrice_VolumeAvg, digits = 4)
+s2o_stocks$Wk2_Price = round((s2o_stocks$Jan_14_MktPrice_Close - 
+                                s2o_stocks$Jan_07_MktPrice_Close) /
+                               s2o_stocks$Jan_07_MktPrice_Close, digits = 4)                              
+s2o_stocks$Wk2_Volume = round((s2o_stocks$Jan_14_MktPrice_Volume - 
+                                 s2o_stocks$MktPrice_VolumeAvg) / 
+                                s2o_stocks$MktPrice_VolumeAvg, digits = 4)
+# 2 weeks price change
+s2o_stocks$Wk_2_Price = round((s2o_stocks$Jan_14_MktPrice_Close - 
+                                 s2o_stocks$MktPrice_Close) / 
+                                s2o_stocks$MktPrice_Close, digits = 4)
+```
+
+### Final Recordset
+
+Let's get rid of all unneccessary data, i.e. exclude low volume stocks and columns that we are not going to analyze. Also we shall rename column names to make them shorter and easier to use. 
+
+Note though that all values describing price, volume or technical indicators in this final dataset are not absolute values - they are percent of change of a value or percent of the difference between two values.
+
+```{r}
+# final data set
+stocks <- subset(s2o_stocks, MktPrice_VolumeAvg > 64000, 
+    select=c(InstrID, Sector, MktCapType, FS_EPS, 
+        FS_GrowthGrade, FS_GrowthGradeYOY,
+        MA10_Price, MA30_Price, MA50_Price, MA150_Price, MA200_Price, 
+        MA10_MA50, MA10_MA200, MA50_MA200, RSIV, MACD,  
+        Price, Volume, Wk1_Price, Wk1_Volume, Wk2_Price, Wk2_Volume, Wk_2_Price,
+        MA10_ChangePcnt, MA30_ChangePcnt, MA50_ChangePcnt, MA150_ChangePcnt, 
+        MA200_ChangePcnt))
+# change headers
+names(stocks) <- c('InstrID', 'Sector', 'MktCap', 'EPS', 
+        'GrGrade', 'GrGradeYOY',
+        'MA10_Price', 'MA30_Price', 'MA50_Price', 'MA150_Price', 'MA200_Price', 
+        'MA10_MA50', 'MA10_MA200', 'MA50_MA200', 'RSI', 'MACD',  
+        'Price', 'Volume', 
+        'Wk1_Price', 'Wk1_Volume', 'Wk2_Price', 'Wk2_Volume', 'Wk_2_Price',
+        'MA10_ChPcnt', 'MA30_ChPcnt', 'MA50_ChPcnt', 'MA150_ChPcnt', 
+        'MA200_ChPcnt')
+```
+
+Data Set Structure
+```{r}
+str(stocks)
+```
+
+Data Summary
+```{r}
+summary(stocks)
+```
+
+## Analysis
+
+Price changes for the first two weeks of January 2016
+
+```{r}
+p1 <- ggplot(aes(x = (Wk1_Price * 100)), data = stocks) + 
+  geom_histogram(binwidth = .5, fill = '#5760AB') + 
+  coord_cartesian(ylim = c(0, 130)) + 
+  xlab('Jan 7 - 1 wk price change %') +
+  geom_vline(xintercept=0)
+p2 <- ggplot(aes(x = (Wk2_Price * 100)), data = stocks) + 
+  geom_histogram(binwidth = .5, fill = '#5760AB') +
+  coord_cartesian(ylim = c(0, 130)) + 
+  xlab('Jan 14 - 1 wk price change %') +
+  geom_vline(xintercept=0)
+grid.arrange(p1, p2, ncol=2)
+```
+
+For the first week of January most of the stock prices moved down and the next week the trend continues, but with the lower pace - more price changes were close to 0 or even ended the week in a slightly positive territory. 
+
+It is easy to compare price changes between week 1 and week 2 on the following plots.
+
+```{r}
+p1 <- qplot(x = Wk1_Price*100, data=stocks, geom='freqpoly', color=Sector) +
+  coord_cartesian(xlim = c(-50, 50))
+p2 <- qplot(x = Wk2_Price*100, data=stocks, geom='freqpoly', color=Sector) +
+  coord_cartesian(xlim = c(-50, 50))
+grid.arrange(p1, p2, ncol=1)
+```
+
+We can also see that volume of trades on week 2 was slightly higher with a few really big moves - for some stocks the volume increased 20 times compare to the average daily volume.
+
+```{r}
+p1 <- ggplot(aes(x = Wk1_Volume, y = Wk1_Price*100), data = stocks) + 
+  geom_point(alpha = 0.5, position = 'jitter') +
+  coord_cartesian(ylim = c(-40, 40)) +
+  ylab('Jan 7 - 1 week price change %') + xlab('1 wk volume change%')
+p2 <- ggplot(aes(x = Wk2_Volume, y = Wk2_Price*100), data = stocks) + 
+  geom_point(alpha = 0.5, position = 'jitter') +
+  coord_cartesian(ylim = c(-40, 40)) +
+  ylab('Jan 14 - 1 week price change %') + xlab('1 wk volume change%')
+grid.arrange(p1, p2, ncol=2)
+```
+
+Let's discover this trend further and take a close look to the majority of stocks volume changes:
+
+```{r}
+# -- volume change boxplots
+p1 <- qplot(x = substr(Sector,0,3), y = Wk1_Volume, data = stocks, 
+            geom = 'boxplot') +
+  xlab('Sector') +
+  coord_cartesian(ylim = c(-2, 5))
+p2 <- qplot(x = substr(Sector,0,3), y = Wk2_Volume, data = stocks, 
+            geom = 'boxplot') +
+  xlab('Sector') +
+  coord_cartesian(ylim = c(-2, 5))
+grid.arrange(p1, p2, ncol=2)
+```
+
+In general, the volume keep growing with a similar pace (we show volume changes on the plot, therefore positive values mean positive growth). At the same time the number of outliers with really big volume increase has grown on week 2.
+
+Similar analysis for the price change by sector clearly shows that median price change is getting closer to a 0 level on week 2, which means that situation on a market is stabilazing a bit. Basic materials and Utilities are among those sectors that recovered their losses the most. Once again, it seems explainable by fluctuation of the oil prices.
+
+```{r}
+# -- price change boxplots
+p1 <- qplot(x = substr(Sector,0,5), y = Wk1_Price*100, data = stocks, 
+            geom = 'boxplot') +
+  xlab('Sector') + ylab('1st week price chnage, %') +
+  coord_cartesian(ylim = c(-50, 50))
+p2 <- qplot(x = substr(Sector,0,5), y = Wk2_Price*100, data = stocks, 
+            geom = 'boxplot') +
+  xlab('Sector') + ylab('2nd week price chnage, %') +
+  coord_cartesian(ylim = c(-50, 50))
+grid.arrange(p1, p2, ncol=2)
+```
+
+The price changes for the week 1 and week 2 by sector show that price changes for the second week of January is less dramatic (less spread) and moving close to a zero line and to the positive territory.
+
+```{r}
+ggplot(aes(x=substr(Sector,0,5)), data = stocks) +
+  geom_point(aes(y=Wk1_Price*100, colour="Week 1"), alpha=0.6, 
+             position=position_jitter(h=0)) +
+  geom_point(aes(y=Wk2_Price*100, colour="Week 2"), alpha=0.3, 
+             position=position_jitter(h=0)) +
+  xlab('Sector') + ylab('Price Change %') +
+  scale_colour_manual("", values=c("Week 1"="blue", "Week 2"="orange")) +
+  geom_hline(yintercept=0)
+```
+
+Cumulative two weeks price change by sector:
+
+```{r}
+ggplot(aes(x=substr(Sector,0,5)), data = stocks) +
+  geom_point(aes(y=Wk_2_Price*100), alpha=0.6, color='red', 
+             position=position_jitter(h=0)) +
+  xlab('Sector') + ylab('Price Change %') +
+  ggtitle('Two weeks price change by sector') +
+  geom_hline(yintercept=0)
+```
+
+Before we start analyzing dependency between technical indicators and price changes, it is interesting to take a look to the technical indicator values distribution. Note that moving average values here show the difference between stock price as of December 31st, 2015 and the corresponding moving average value. For example, MA10_Price of 10% means that 10 day moving average is above the price by 10%.
+
+```{r}
+p1 <- ggplot(aes(x = MA10_Price*100), data = stocks) + 
+  geom_histogram(binwidth = .3, fill = '#5760AB') +
+  geom_vline(xintercept=0)
+p2 <- ggplot(aes(x = MA30_Price*100), data = stocks) + 
+  geom_histogram(binwidth = .5, fill = '#5760AB') +
+  geom_vline(xintercept=0)
+p3 <- ggplot(aes(x = MA50_Price*100), data = stocks) + 
+  geom_histogram(binwidth = .8, fill = '#5760AB') +
+  geom_vline(xintercept=0)
+p4 <- ggplot(aes(x = MA150_Price*100), data = stocks) + 
+  geom_histogram(binwidth = 1, fill = '#5760AB') +
+  geom_vline(xintercept=0)
+p5 <- ggplot(aes(x = MA200_Price*100), data = stocks) + 
+  geom_histogram(binwidth = 1, fill = '#5760AB') +
+  geom_vline(xintercept=0)
+grid.arrange(p1, p2, p3, p4, p5, ncol=2)
+```
+
+The longer the moving average time frame, the wider changes we can see, which is expected, because a 1 day moving average will follow the price line really closely. Based on these plots, most of the moving averages have negative values with median slightly below 0 line. Perhaps, it means that the majority of stocks have been in the "negative" territory for quite a while.
+
+The plot for RSI is somewhat similar. Because of the computation we made for RSI, we should keep in mind that anything below zero means that those stocks "undeperform", while all positive values show "well performed", compare to their previous performance, stocks. 
+
+```{r}
+ggplot(aes(x = RSI), data = stocks) + 
+  geom_histogram(binwidth = .02, fill = '#5760AB') +
+  geom_vline(xintercept=0)
+```
+
+MACD shows slightly differnet picture - majority of the stocks are really close to a 0 line, with larger number of stocks in a positive territory. Similarly to the MA plots, MACD plot also has a long tails.
+
+```{r}
+p1 <- ggplot(aes(x = MACD), data = stocks) + 
+  geom_histogram(binwidth = .05, fill = '#5760AB') +
+  geom_vline(xintercept=0)
+p2 <- ggplot(aes(x = MACD), data = stocks) + 
+  geom_histogram(binwidth = .01, fill = '#5760AB') +
+  scale_x_continuous(lim = c(-1, 1)) +
+  geom_vline(xintercept=0)
+grid.arrange(p1, p2, ncol=2)
+```
+
+### Correlation between technical indicators and price changes
+
+We need to transform stocks data set (reshape from "wide" to "long" format) in order to easily create plots between each technical indicator and price change.
+
+```{r}
+stocks.ma = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price"),
+  measure.vars = c("MA10_Price", "MA30_Price", "MA50_Price", "MA150_Price", 
+                   "MA200_Price"))
+
+stocks.ma_ch = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price"), 
+  measure.vars = c("MA10_ChPcnt", "MA30_ChPcnt", "MA50_ChPcnt", "MA150_ChPcnt", 
+                   "MA200_ChPcnt"))
+
+stocks.ma_x = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price"), 
+  measure.vars = c("MA10_MA50", "MA10_MA200", "MA50_MA200"))
+
+stocks.sec = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price"), 
+  measure.vars = c("RSI", "MACD"))
+```
+
+Let's start with a simple scatter plots with added linear correlation line.
+
+#### Technical indicators vs first week price change
+
+```{r}
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.ma) +
+  xlab('MA vs Price %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7) 
+
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.ma_ch) +
+  xlab('MA Change %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7)
+
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.ma_x) +
+  xlab('MA vs MA %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7)
+
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.sec) +
+  xlab('RSI and MACD %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7)
+```
+
+The longer the term of the moving average, the bigger spread of the change between MA and price value.
+
+#### Technical indicators vs second week price change
+
+```{r}
+ggplot(aes(x = value*100, y = Wk2_Price*100), data = stocks.ma) +
+  xlab('MA vs Price %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7)
+
+ggplot(aes(x = value*100, y = Wk2_Price*100), data = stocks.ma_ch) +
+  xlab('MA Change %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7)
+
+ggplot(aes(x = value*100, y = Wk2_Price*100), data = stocks.ma_x) +
+  xlab('MA vs MA %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7)
+
+ggplot(aes(x = value*100, y = Wk2_Price*100), data = stocks.sec) +
+  xlab('RSI and MACD %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = variable), alpha = 0.8, size=1, position = "jitter") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_smooth(method = "lm", color = "red", size=0.3, alpha=0.7) 
+```
+
+There is a small positive correlation between moving average and a price change for most of the moving averages. However, the shortest one - 10 days moving average - seems to have a negative correlation. In all cases the linear correlation seems to be really small, insignificant.
+
+Let's examine numerical values for correlation coefficients using Pearson model as a measure of a possible linear correlation. I'm also interested to see how strong the depency is, therefore I'm adding a Kendall's rank as well.
+
+```{r}
+GetCorr <- function(x) {
+  # Computes mean and standard deviation of the x variable
+  # Computes Pearson correlation (cor_*) and 
+  # Kendall's rank (tau_*)  between x variable
+  #  and first, second and two weeks price changes.
+  m <- with(stocks, mean(x))
+  sd <- with(stocks, sd(x))
+  P_Wk1 <- with(stocks, cor.test(x=Wk1_Price, y=x), model = "pearson")
+  P_Wk2 <- with(stocks, cor.test(x=Wk2_Price, y=x), model = "pearson")
+  P_Wk_2 <- with(stocks, cor.test(x=Wk_2_Price, y=x), model = "pearson")
+  K_Wk1 <- with(stocks, cor.test(x=Wk1_Price, y=x), model = "kendall")
+  K_Wk2 <- with(stocks, cor.test(x=Wk2_Price, y=x), model = "kendall")
+  K_Wk_2 <- with(stocks, cor.test(x=Wk_2_Price, y=x), model = "kendall")
+  
+  return(list(mean=m, sd=sd, 
+      cor_wk1 = P_Wk1$estimate, cor_wk2 = P_Wk2$estimate, 
+      cor_wk_2 = P_Wk_2$estimate,
+      tau_wk1 = K_Wk1$estimate, tau_wk2 = K_Wk2$estimate, 
+      tau_wk_2 = K_Wk_2$estimate)
+  )
+}
+ma10 <- GetCorr(stocks$MA10_Price)
+ma30 <- GetCorr(stocks$MA30_Price)
+ma50 <- GetCorr(stocks$MA50_Price)
+ma150 <- GetCorr(stocks$MA150_Price)
+ma200 <- GetCorr(stocks$MA200_Price)
+ma10_ma50 <- GetCorr(stocks$MA10_MA50)
+ma10_ma200 <- GetCorr(stocks$MA10_MA200)
+ma50_ma200 <- GetCorr(stocks$MA50_MA200)
+rsi <- GetCorr(stocks$RSI)
+macd <- GetCorr(stocks$MACD)
+ma10c <- GetCorr(stocks$MA10_ChPcnt)
+ma30c <- GetCorr(stocks$MA30_ChPcnt)
+ma50c <- GetCorr(stocks$MA50_ChPcnt)
+ma150c <- GetCorr(stocks$MA150_ChPcnt)
+ma200c <- GetCorr(stocks$MA200_ChPcnt)
+```
+
+#### Pearson Correlation
+
+Compute Pearson Correlation to measure the linear correlation between technical indicators and the price change.
+
+```{r, results='asis'}
+Indicator = c("MA10", "MA30", "MA50", "MA150", "MA200", "MA10_MA50", 
+              "MA10_MA200", "MA50_MA200", "RSI", "MACD", "MA10 change", 
+              "MA30 change", "MA50 change", "MA150 change", "MA200 change")
+Week1 = c(ma10$cor_wk1, ma30$cor_wk1, ma50$cor_wk1, ma150$cor_wk1, 
+          ma200$cor_wk1, ma10_ma50$cor_wk1, ma10_ma200$cor_wk1, 
+          ma50_ma200$cor_wk1, rsi$cor_wk1, macd$cor_wk1,
+          ma10c$cor_wk1, ma30c$cor_wk1, ma50c$cor_wk1, ma150c$cor_wk1, 
+          ma200c$cor_wk1)
+Week2 = c(ma10$cor_wk2, ma30$cor_wk2, ma50$cor_wk2, ma150$cor_wk2, 
+          ma200$cor_wk2, ma10_ma50$cor_wk2, ma10_ma200$cor_wk2, 
+          ma50_ma200$cor_wk2, rsi$cor_wk2, macd$cor_wk2,
+          ma10c$cor_wk2, ma30c$cor_wk2, ma50c$cor_wk2, ma150c$cor_wk2, 
+          ma200c$cor_wk2)
+TwoWeeks = c(ma10$cor_wk_2, ma30$cor_wk_2, ma50$cor_wk_2, ma150$cor_wk_2, 
+          ma200$cor_wk_2, ma10_ma50$cor_wk_2, ma10_ma200$cor_wk_2, 
+          ma50_ma200$cor_wk_2, rsi$cor_wk_2, macd$cor_wk_2,
+          ma10c$cor_wk_2, ma30c$cor_wk_2, ma50c$cor_wk_2, ma150c$cor_wk_2, 
+          ma200c$cor_wk_2)
+dfPearson = data.frame(Indicator, Week1, Week2, TwoWeeks)
+knitr::kable(dfPearson, digits=8)
+```
+
+#### Kendall Rank
+
+Compute Kendall Rank to measure the association between technical indicators and price changes. 
+
+```{r, results='asis'}
+Week1 = c(ma10$tau_wk1, ma30$tau_wk1, ma50$tau_wk1, ma150$tau_wk1, 
+          ma200$tau_wk1, ma10_ma50$tau_wk1, ma10_ma200$tau_wk1, 
+          ma50_ma200$tau_wk1, rsi$tau_wk1, macd$tau_wk1,
+          ma10c$tau_wk1, ma30c$tau_wk1, ma50c$tau_wk1, ma150c$tau_wk1, 
+          ma200c$tau_wk1)
+Week2 = c(ma10$tau_wk2, ma30$tau_wk2, ma50$tau_wk2, ma150$tau_wk2, 
+          ma200$tau_wk2, ma10_ma50$tau_wk2, ma10_ma200$tau_wk2, 
+          ma50_ma200$tau_wk2, rsi$tau_wk2, macd$tau_wk2,
+          ma10c$tau_wk2, ma30c$tau_wk2, ma50c$tau_wk2, ma150c$tau_wk2, 
+          ma200c$tau_wk2)
+TwoWeeks = c(ma10$tau_wk_2, ma30$tau_wk_2, ma50$tau_wk_2, ma150$tau_wk_2, 
+          ma200$tau_wk_2, ma10_ma50$tau_wk_2, ma10_ma200$tau_wk_2, 
+          ma50_ma200$tau_wk_2, rsi$tau_wk_2, macd$tau_wk_2,
+          ma10c$tau_wk_2, ma30c$tau_wk_2, ma50c$tau_wk_2, ma150c$tau_wk_2, 
+          ma200c$tau_wk_2)
+dfKendall = data.frame(Indicator, Week1, Week2, TwoWeeks)
+knitr::kable(dfKendall, digits=8)
+```
+
+Interestingly enough, the highest correlation coefficiant values belong to the ratios that describe relationship between moving averages (MA10_MA50, MA10_MA200 and MA50_MA200) and also to the values that describe most recent moving avearge change. The latest one was thrown into the list of interesting parameters because it also gives us an idea of the very short term moving average incline - if the value of "MA10 change" is positive it means that moving average line on a chart is pointed up and when it is negative, the line is pointing down.
+
+The other higher correlation values could be found in the column "TwoWeeks", which shows correlation between technical indicators and two weeks price change. Interesting that relatively high values are for MA150 and MA200 - 0.2385 and 0.2349. It could be explained because 200 days moving average is so popular that so many investors are using it for longer term projections and we can expect this correlation to grow even more for longer time frames for price change tracking.
+
+However, even the highest values are in the low .20th range, meaning that there is very little correlation found. Let's see if we can improve the situation by adding fundamental characteristics to our analysis.
+
+### Mixing technical and fundamental data together
+
+There are two interesting fundamental characteristics available in the original data set - GrowthGrade and GrowthGradeYOY. As described in the documentation, Growth Grade weights historical growth rate for five major financial metrics (Equity, EPS, Sales, Free Cash Flow, Cash from Operating Activity and ROIC) and year and presented as a float in a range 0..100. So, it could be a nice starting point, where we have data from multiple fundamental metrics aggregated in one easy to use value.
+
+Note, that GrowthGradeYOY is almost the same is GrowthGrade, except it is using year over year growth instead of historical (multiple years growth) figure. Therefore, we can work with the GrowthGradeYOY in the same fasion.
+
+First of all, we want to convert Growth Grade values into factored values. It should allow us easily add it to our analysis and mix it with technical characteristics. A simple way would be to group all values in a buckets and name each of them. Bucket size of 20 seems reasonable. Therefore we have 5 buckets above 0 and we name them as A, B, C, D, E. For the 0 grade we will use F (there are should be very few such stocks). So, the best grade is A and the worst is F.
+
+```{r}
+stocks$GrGradeRating <- ifelse(
+  stocks$GrGrade > 80, "A", 
+    ifelse(stocks$GrGrade <= 80 & stocks$GrGrade > 60, "B", 
+      ifelse(stocks$GrGrade <= 60 & stocks$GrGrade > 40, "C",
+        ifelse(stocks$GrGrade <= 40 & stocks$GrGrade > 20, "D",
+          ifelse(stocks$GrGrade <= 20 & stocks$GrGrade > 0, "E", "F")))))
+stocks$GrGradeRating <- factor(stocks$GrGradeRating)
+#is.factor(stocks$GrGradeRating)
+
+stocks$GrGradeYOYRating <- ifelse(
+  stocks$GrGradeYOY > 80, "A", 
+    ifelse(stocks$GrGradeYOY <= 80 & stocks$GrGradeYOY > 60, "B", 
+      ifelse(stocks$GrGradeYOY <= 60 & stocks$GrGradeYOY > 40, "C",
+        ifelse(stocks$GrGradeYOY <= 40 & stocks$GrGradeYOY > 20, "D",
+          ifelse(stocks$GrGradeYOY <= 20 & stocks$GrGradeYOY > 0, "E", "F")))))
+stocks$GrGradeYOYRating <- factor(stocks$GrGradeYOYRating)
+#is.factor(stocks$GrGradeYOYRating)
+```
+
+Now we can redo reshaping and include these new values as a key variables.
+
+```{r}
+stocks.ma = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price", 
+              "GrGradeRating", "GrGradeYOYRating"),
+  measure.vars = c("MA10_Price", "MA30_Price", "MA50_Price", 
+                   "MA150_Price", "MA200_Price"))
+
+stocks.ma_ch = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price", 
+              "GrGradeRating", "GrGradeYOYRating"), 
+  measure.vars = c("MA10_ChPcnt", "MA30_ChPcnt", "MA50_ChPcnt", 
+                   "MA150_ChPcnt", "MA200_ChPcnt"))
+
+stocks.ma_x = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price", 
+              "GrGradeRating", "GrGradeYOYRating"), 
+  measure.vars = c("MA10_MA50", "MA10_MA200", "MA50_MA200"))
+
+stocks.sec = melt(stocks, 
+  id.vars = c("InstrID", "Wk1_Price", "Wk2_Price", "Wk_2_Price", 
+              "GrGradeRating", "GrGradeYOYRating"), 
+  measure.vars = c("RSI", "MACD"))
+```
+
+#### Technical indicators vs first week price change with historical Growth Grade
+
+```{r}
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.ma) +
+  xlab('MA vs Price %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = GrGradeRating), alpha = 0.8, size=1, 
+             position = "jitter") +
+  scale_color_brewer(type="seq", direction=-1,
+        guide = guide_legend(title = 'Growth Grade', reverse = F,
+          override.aes = list(alpha = 1, size = 2))) +  
+  geom_vline(xintercept=0) + geom_hline(yintercept=0)
+
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.ma_ch) +
+  xlab('MA change %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = GrGradeRating), alpha = 0.8, size=1, 
+             position = "jitter") +
+  scale_color_brewer(type="seq", direction=-1,
+        guide = guide_legend(title = 'Growth Grade', reverse = F,
+          override.aes = list(alpha = 1, size = 2))) +  
+  geom_vline(xintercept=0) + geom_hline(yintercept=0)
+
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.ma_x) +
+  xlab('MA vs MA %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = GrGradeRating), alpha = 0.8, size=1, 
+             position = "jitter") +
+  scale_color_brewer(type="seq", direction=-1,
+        guide = guide_legend(title = 'Growth Grade', reverse = F,
+          override.aes = list(alpha = 1, size = 2))) +  
+  geom_vline(xintercept=0) + geom_hline(yintercept=0)
+
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.sec) +
+  xlab('RSI and MACD %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = GrGradeRating), alpha = 0.8, size=1, 
+             position = "jitter") +
+  scale_color_brewer(type="seq", direction=-1,
+        guide = guide_legend(title = 'Growth Grade', reverse = F,
+          override.aes = list(alpha = 1, size = 2))) +  
+  geom_vline(xintercept=0) + geom_hline(yintercept=0)
+```
+
+It does not look like adding Growth Grade helped - we can see stocks with positive and negative Growth Grades in each quadrant of the plots, meaning that there are many scenarios where high graded stocks prices are folling even when technical indicators are still in a positive territory.
+
+## Final Plots and Summary
+
+The data set used for this project, contains information about 2,831 stocks traded on US Stock Exchanges as of December 31st, 2015 with price per share of $10 or higher. The average volume of daily trade for these stocks is in range from 107 to 71 mln shares.
+
+```{r echo=FALSE, warning=FALSE}
+ggplot(aes(x = MktPrice_VolumeAvg, y = MktPrice_Close, colour = mktcap.ordered), 
+       data = s2o_stocks) +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_point(alpha = 0.8, size = 1, position = 'jitter') +
+  scale_color_brewer(type="seq", direction=-1,
+          guide = guide_legend(title = 'Mkt Cap', reverse = F,
+            override.aes = list(alpha = 1, size = 2))) +  
+  xlab('Average Volume (log10)') + ylab('Market Price (log10)') +
+  ggtitle('Price by avg. Volume and Market Capitalization')
+```
+
+In order to minimize bias, low liquid stocks with average daily volume of 64,000 shares or less were eliminated from analysis. It significantly reduced presence of micro and small stocks, but kept all market sectors well presented.
+
+```{r echo=FALSE, warning=FALSE}
+ggplot(aes(x = substr(Sector,0,9), y = MktPrice_Close, color = VAvg_Mln), 
+             data = subset(s2o_stocks, MktPrice_VolumeAvg > 64000)) + 
+  geom_point(alpha = 0.8, size = 1, position = 'jitter') +
+  scale_y_continuous(lim = c(0, quantile(s2o_stocks$MktPrice_Close, 0.99))) +
+  scale_colour_gradientn(colours=c("green", "red"), 
+                         guide_legend(title="Volume (mln)"))+ 
+
+  xlab("Sector") + ylab("Market Price") +
+  ggtitle('Price by Market Sector')
+```
+
+The objective of this project is discover a correlation between technical indicators and a short term (1-2 weeks) stocks price changes. The chosen first two weeks of January, 2016 were relatively active for the stock market with a significant down trend - most stock prices were going down for both weeks.
+
+```{r echo=FALSE}
+ggplot(aes(x=substr(Sector,0,9)), data = stocks) +
+  geom_point(aes(y=Wk1_Price*100, colour="Week 1"), alpha=0.6, 
+             position=position_jitter(h=0)) +
+  geom_point(aes(y=Wk2_Price*100, colour="Week 2"), alpha=0.3, 
+             position=position_jitter(h=0)) +
+  xlab('Sector') + ylab('Price Change %') +
+  scale_colour_manual("", values=c("Week 1"="blue", "Week 2"="orange")) +
+  geom_hline(yintercept=0)
+```
+
+We used short, medium and long term moving averages, RSI and MACD as technical indicators. All absolute values available for the day of December 31st, 2015 were converted to a change percentage. As a result we have tried to find correlation between future 1 and 2 weeks price change and the following values:
+
+* distance in % from price to 10 days moving avearge (short term)
+* distance in % from price to 30 days moving avearge (short term)
+* distance in % from price to 50 days moving avearge (medium term)
+* distance in % from price to 150 days moving avearge (long term)
+* distance in % from price to 200 days moving avearge (long term)
+* distance in % from 10 days moving avearge to 50 days MA (short to medium term MA)
+* distance in % from 10 days moving avearge to 200 days MA (short to long term MA)
+* distance in % from 50 days moving avearge to 200 days MA (medium to long term MA)
+* RSI value as a distance from 50 level (middle level)
+* MACD histogram value
+
+In this project we could not identify any significant correlation between described above technical indicator parameters and short-term future price changes. Below are Pearson Correlation coefficients between technical indicators and the price change.
+
+```{r, results='asis'}
+knitr::kable(dfPearson, digits=8)
+```
+
+The highest correlation rates found are less than 0.25 and belong to the changes in moving average value and to the difference between moving averages of different length. The correlation coefficient is too small to be significant, however it suggests that perhaps a better described moving averages value changes (current and historical) can better predict future change in a corresponding stock price. Mathematical description of the relationship between moving averages of different lengths should also be considered as a possible point of interest for further research.
+
+Other notable observation is MACD and the shortest analyzed moving average - 10 days moving average - have small but negative correlation to future price change, while all other moving averages and RSI have correlation with a positive sign. Perhaps it could be explained by high volatility on stock market and it may be suggested to explore this dependency further, it could be used as an early signal for price direction change.
+
+In a search for additional parameter that could help differentiate stocks and perhaps improve situation, we added fundamental characteristic - Growth Grade, which combines growth rates for five major financial metrics (Equity, EPS, Sales, Free Cash Flow, Cash from Operating Activity and ROIC) for the last 10 years (or as many as available). However, it did not improve results and a typical plot that shows future price change versus a technical indicator looks like the plots for moving averages shown below.
+
+```{r echo=FALSE, warning=FALSE}
+ggplot(aes(x = value*100, y = Wk1_Price*100), data = stocks.ma) +
+  xlab('MA vs Price %') + ylab('First week price change %') +
+  facet_wrap(~ variable, ncol=2) +
+  geom_point(aes(color = GrGradeRating), alpha = 0.8, size=1, 
+             position = "jitter") +
+  scale_color_brewer(type="seq", direction=-1,
+          guide = guide_legend(title = 'Growth Grade', reverse = F,
+            override.aes = list(alpha = 1, size = 2))) +  
+  geom_vline(xintercept=0) + geom_hline(yintercept=0)
+```
+
+The figures on these plots are almost symmetrical and cover all four quadrants of the plot, meaning that there are relatively similar number of stocks with good fundamental grades could be found in the left section of the plot, where corresponding moving averages are above the price line and in the right section, presenting stocks which moving averages are below the price line. Both those scenarios found in the above and below zero line sections, representing price change of a stock, meaning that the number of good graded stocks that went down is similar to the number of bad rated stocks that went down.
+
+These charts support low correlation coefficiants computed for each analyzed technical indicator. In other words, we could not discover any significant correlation between analyzed representation of technical indicators and short term price changes of a stock.
+
+The results of this research should be considered as a reminder that we live in a time of global economy, where each country and each business depends on everything else. It seems important to keep in mind that during first weeks of 2016 the US stock market was moved mostly by global news: oil prices dropped below 12 year low across the globe; China (the second largest economy) kept sending warning signals about slowing down it's growth; warries about Greece and Eurozone future and more. All these news practically hid all individual business achievements. It makes possible to think that by choosing a different time frame we could receive different results and if so, such models should be used with extreme caution.
+
+## Reflection
+
+I selected stocks information for this research because I'm really interested in stock analysis. I expected a bit better results though, I was really hoping to find a correlation between technical indicators and future price moves. The results confirmed that trading stocks probably more an art than a science. It also gave me the hint where to go for further data exploration and analysis and I'm going to work on additional information for the data set, such as more detailed description of a trend, perhaps in a form of pivot points, for moving averages. I'm curious how that could change results of a similar analysis.
+
+Another interesting experiment would be to run the same type of analysis for few other time frames. May be run it for every quarter of 2015, trying to avoid earnings season, where stock prices become extremely volatile and very news-driven.
+
+I really enjoyed working on this project - R and R-studio are absolutely amazing! I love the whole idea of keeping research notes and code in one .rmd file. One thing that I would like to explore more is how to effectively split my work into multiple files, because the larger the file, the longer time it takes to knit it.
+
